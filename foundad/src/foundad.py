@@ -23,8 +23,13 @@ class LinearProjector(torch.nn.Module):
 
 
 class VisionModule(nn.Module):
-    def __init__(self, model_name: str, pred_depth: int, pred_emb_dim: int, use_cuda: bool = True, if_pe: bool = True, feat_normed: bool = False):
+    def __init__(self, model_name: str, pred_depth: int, pred_emb_dim: int, use_cuda: bool = True, if_pe: bool = True, feat_normed: bool = False,
+                 weights_path: Optional[str] = None, repo_dir: Optional[str] = None, arch: str = "dinov3_vitb16"):
         super().__init__()
+        # Used only by the "dinov3_local" branch (a user-trained DINOv3 backbone).
+        self.weights_path = weights_path
+        self.repo_dir = repo_dir
+        self.arch = arch
         (self.encoder, self.num_patches, self.embed_dim, self.processor, self.projector) = self._build_encoder(model_name)
         self.model_name = model_name
 
@@ -57,6 +62,11 @@ class VisionModule(nn.Module):
         elif model == "dinov3":
             enc = torch.hub.load("facebookresearch/dinov3", 'dinov3_vitb16', source="github").eval()
             num_patches, embed_dim = enc.patch_embed.num_patches, enc.embed_dim
+        elif model == "dinov3_local":
+            # A DINOv3 ViT backbone you trained yourself (SSL). We build the architecture
+            # and load your local checkpoint instead of Meta's official weights.
+            enc = self._load_local_dinov3(self.arch, self.weights_path, self.repo_dir).eval()
+            num_patches, embed_dim = enc.patch_embed.num_patches, enc.embed_dim
         elif model == "dino":
             enc = torch.hub.load("facebookresearch/dino:main", "dino_vitb16").eval(); num_patches, embed_dim = 1024, enc.embed_dim
         elif model == "siglip":
@@ -74,15 +84,81 @@ class VisionModule(nn.Module):
         else:
             raise ValueError(f"Unknown model: {model}")
         if model != 'dinosiglip':
-            for p in enc.parameters(): 
+            for p in enc.parameters():
                 p.requires_grad = False
         return enc, num_patches, embed_dim, processor, projector
+
+    def _load_local_dinov3(self, arch: str, weights_path: Optional[str], repo_dir: Optional[str]):
+        """Build a DINOv3 ViT and load user-trained SSL weights from a local file.
+
+        - ``arch``: hub entrypoint name, e.g. ``dinov3_vitb16``.
+        - ``weights_path``: path to your checkpoint (SSL training ckpt or a plain backbone state_dict).
+        - ``repo_dir``: local clone of facebookresearch/dinov3. If ``None`` the code is fetched from GitHub.
+        """
+        if not weights_path:
+            raise ValueError(
+                "model='dinov3_local' requires meta.weights_path pointing to your trained backbone checkpoint."
+            )
+        # 1) Instantiate the architecture WITHOUT downloading Meta's official weights.
+        src = "local" if repo_dir else "github"
+        repo = repo_dir if repo_dir else "facebookresearch/dinov3"
+        try:
+            enc = torch.hub.load(repo, arch, source=src, pretrained=False)
+        except TypeError:
+            # Some hub entrypoints expose `weights=` rather than `pretrained=`.
+            enc = torch.hub.load(repo, arch, source=src, weights=None)
+        # 2) Load your checkpoint, unwrapping common SSL containers/prefixes.
+        ckpt = torch.load(weights_path, map_location="cpu")
+        state = self._extract_backbone_state_dict(ckpt)
+        missing, unexpected = enc.load_state_dict(state, strict=False)
+        matched = len(state) - len(unexpected)
+        print(f"[dinov3_local] Loaded backbone weights from: {weights_path}")
+        print(f"[dinov3_local] matched={matched} | missing={len(missing)} | unexpected={len(unexpected)}")
+        if matched == 0:
+            raise RuntimeError(
+                "[dinov3_local] No weights matched the architecture. Check that meta.arch matches the "
+                "checkpoint you trained, and that the file is a DINOv3 backbone/SSL checkpoint."
+            )
+        if missing:
+            print(f"[dinov3_local] e.g. missing keys: {list(missing)[:5]}")
+        if unexpected:
+            print(f"[dinov3_local] e.g. unexpected keys: {list(unexpected)[:5]}")
+        return enc
+
+    @staticmethod
+    def _extract_backbone_state_dict(ckpt):
+        """Return a flat backbone state_dict from an arbitrary DINOv3/DINOv2 checkpoint.
+
+        Handles training checkpoints wrapped as {"teacher"/"student"/"model"/"state_dict": ...},
+        strips common prefixes (module./backbone./teacher./...), and drops SSL head params.
+        """
+        if isinstance(ckpt, dict):
+            for key in ("teacher", "model", "state_dict", "student", "backbone"):
+                if key in ckpt and isinstance(ckpt[key], dict):
+                    ckpt = ckpt[key]
+                    break
+        prefixes = ("module.", "backbone.", "teacher.", "student.", "encoder.")
+        drop_substrings = ("dino_head", "ibot_head", "head.", "mask_token", "criterion")
+        new_sd = {}
+        for k, v in ckpt.items():
+            nk = k
+            changed = True
+            while changed:
+                changed = False
+                for pref in prefixes:
+                    if nk.startswith(pref):
+                        nk = nk[len(pref):]
+                        changed = True
+            if any(s in nk for s in drop_substrings):
+                continue
+            new_sd[nk] = v
+        return new_sd
 
     def _extract(self, imgs: torch.Tensor, paths: List[str], n_layer: int = 3):
         if self.model_name == "dinov2":
             h = self.encoder.get_intermediate_layers(imgs, n=n_layer, return_class_token=False)[0] # the thrid last block
-        elif self.model_name == "dinov3":
-            h = self.encoder.get_intermediate_layers(imgs, n=n_layer, return_class_token=False)[0] 
+        elif self.model_name in ("dinov3", "dinov3_local"):
+            h = self.encoder.get_intermediate_layers(imgs, n=n_layer, return_class_token=False)[0]
         elif self.model_name == "dino":
             h = self.encoder.get_intermediate_layers(imgs, n=n_layer)[0][:,1:,:]
         elif self.model_name == "siglip":

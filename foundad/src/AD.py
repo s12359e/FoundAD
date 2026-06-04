@@ -30,6 +30,9 @@ def _build_model(meta: Dict[str, Any]) -> VisionModule:
         pred_emb_dim=meta["pred_emb_dim"],
         if_pe=meta.get("if_pred_pe", True),
         feat_normed=meta.get("feat_normed", False),
+        weights_path=meta.get("weights_path"),
+        repo_dir=meta.get("repo_dir"),
+        arch=meta.get("arch", "dinov3_vitb16"),
     )
 
 @torch.inference_mode()
@@ -161,8 +164,9 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     dataset_name = cfg["data"].get("dataset", "mvtec")
-    assert dataset_name in cfg["data"]["test_root"] # check if eval on the same dataset the ckpt trained on
-    
+    if dataset_name in ("mvtec", "visa"):
+        assert dataset_name in cfg["data"]["test_root"] # check if eval on the same dataset the ckpt trained on
+
     test_root = Path(cfg["data"]["test_root"])
     exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff", "*.webp", "*.JPG", "*.JPEG", "*.PNG", "*.BMP", "*.TIF", "*.TIFF", "*.WEBP")
     img_paths: List[Path] = []

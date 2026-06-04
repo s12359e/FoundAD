@@ -72,7 +72,10 @@ def generate_target_foreground_mask(img: np.ndarray, subclass: str) -> np.ndarra
         target_background_mask = target_background_mask.astype(bool).astype(int)
         target_foreground_mask = 1 - target_background_mask
     else:
-        raise NotImplementedError("Unsupported foreground segmentation category")
+        # Custom datasets: class names won't match the MVTec/VisA presets above.
+        # Fall back to using the whole image as foreground so anomalies can be
+        # pasted anywhere (same behaviour as texture classes like carpet/tile).
+        target_foreground_mask = np.ones_like(img_gray)
 
     target_foreground_mask = morphology.closing(
         target_foreground_mask, morphology.square(6))

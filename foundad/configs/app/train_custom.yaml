@@ -1,0 +1,26 @@
+# @package app
+# Preset for training FoundAD on top of YOUR OWN DINOv3 backbone (SSL-trained).
+# Override the three "local backbone" fields below from the command line or here.
+meta:
+  model: 'dinov3_local'        # use a locally-trained DINOv3 ViT as the frozen encoder
+
+  # ---- your trained backbone ----
+  weights_path: /path/to/your/dinov3_vitb16.pth   # REQUIRED: your SSL checkpoint
+  repo_dir: null               # local clone of facebookresearch/dinov3; null = fetch from GitHub
+  arch: 'dinov3_vitb16'        # hub entrypoint; must match what you trained (e.g. dinov3_vitb16 / dinov3_vits16)
+
+  # ---- FoundAD projector / training ----
+  crop_size: 512               # input resolution; patches = (crop_size / patch_size)^2
+  pred_depth: 6
+  pred_emb_dim: 384
+  use_bfloat16: false
+  if_pred_pe: false
+  n_layer: 3                   # which intermediate encoder layer to read (from the last)
+  feat_normed: false
+  loss_mode: 'l2'              # l2 or smooth_l1
+
+model_name: dinov3_local       # used by AD/demo to locate the log folder ${app.meta.model}
+
+logging:
+  folder: logs/${data.data_name}/${app.meta.model}${oc.select:diy_name,""}
+  write_tag: train

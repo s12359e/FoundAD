@@ -15,7 +15,8 @@ The implementation of the paper **Foundation Visual Encoders Are Secretly Few-Sh
    - [Few-Shot Sampling](#few-shot-sampling)
    - [Model Training](#model-training)
    - [Anomaly Detection / Inference](#anomaly-detection--inference)
-4. [Acknowledgement](#acknowledgement)
+4. [Custom Backbone & Dataset](#custom-backbone--dataset)
+5. [Acknowledgement](#acknowledgement)
    
 
 ## Environment Setup
@@ -84,6 +85,11 @@ After training, run inference:
 python foundad/main.py mode=AD data.dataset=mvtec data.data_name=mvtec_1shot diy_name=dbug data.test_root=/media/ymxlzgy/Data21/xinyan/mvtec app=test app.ckpt_step=1950
 ```
 where `data.test_root` is the dataset folder, and `app` is test_dinov2 or test_dinov3 under `configs/app/`. To adjust sample number K, please specify `testing.K_top_mvtec` and `testing.K_top_visa`.
+
+## Custom Backbone & Dataset
+
+Want to use **your own DINOv3 ViT backbone (SSL-trained)** as the encoder, on **your own dataset**?
+See [CUSTOM_USAGE.md](./CUSTOM_USAGE.md) for a step-by-step tutorial (use the `app=train_custom` preset and the `dinov3_local` encoder).
 
 ## Acknowledgement
 This repo utilizes [DINOv3](https://github.com/facebookresearch/dinov3), [DINOv2](https://github.com/facebookresearch/dinov2), [DINO](https://github.com/facebookresearch/dino), [SigLIP](https://github.com/google-research/big_vision), [CLIP](https://github.com/openai/CLIP) and [DINOSigLIP](https://github.com/tri-ml/prismatic-vlms). We also thank [I-JEPA](https://github.com/facebookresearch/ijepa) for the inspiration.
