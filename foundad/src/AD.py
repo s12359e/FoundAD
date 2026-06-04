@@ -33,6 +33,7 @@ def _build_model(meta: Dict[str, Any]) -> VisionModule:
         weights_path=meta.get("weights_path"),
         repo_dir=meta.get("repo_dir"),
         arch=meta.get("arch", "dinov3_vitb16"),
+        config_file=meta.get("config_file"),
     )
 
 @torch.inference_mode()

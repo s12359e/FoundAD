@@ -35,6 +35,7 @@ class Trainer:
         self.model = VisionModule(
             mcfg["model"], mcfg["pred_depth"], mcfg["pred_emb_dim"], if_pe=mcfg.get("if_pred_pe", True), feat_normed=mcfg.get("feat_normed", False),
             weights_path=mcfg.get("weights_path"), repo_dir=mcfg.get("repo_dir"), arch=mcfg.get("arch", "dinov3_vitb16"),
+            config_file=mcfg.get("config_file"),
         )
         self.n_layer = args["meta"].get("n_layer", 3)
         self.model.predictor.requires_grad_(True)

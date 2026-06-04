@@ -2,15 +2,31 @@
 # Preset for training FoundAD on top of YOUR OWN DINOv3 backbone (SSL-trained).
 # Override the three "local backbone" fields below from the command line or here.
 meta:
-  model: 'dinov3_local'        # use a locally-trained DINOv3 ViT as the frozen encoder
+  # Two ways to load YOUR trained DINOv3 backbone as the frozen encoder:
+  #   * 'dinov3_local' : build a fixed torch.hub arch (set `arch`) and load your weights. Simple.
+  #   * 'dinov3_cfg'   : rebuild the EXACT architecture from your DINOv3 training yaml
+  #                      (build_model_from_cfg style) via `config_file`. Use this when your SSL
+  #                      model was configured through a DINOv3 yaml so the arch matches precisely.
+  model: 'dinov3_local'        # 'dinov3_local' or 'dinov3_cfg'
 
   # ---- your trained backbone ----
-  weights_path: /path/to/your/dinov3_vitb16.pth   # REQUIRED: your SSL checkpoint
-  repo_dir: null               # local clone of facebookresearch/dinov3; null = fetch from GitHub
-  arch: 'dinov3_vitb16'        # hub entrypoint; must match what you trained (e.g. dinov3_vitb16 / dinov3_vits16)
+  # REQUIRED: your SSL checkpoint. For the autoresearch_ssl trainer this is e.g.
+  #   autoresearch_ssl/runs/last_teacher.pth  (backbone is under the "teacher_backbone" key,
+  #   which the loader unwraps automatically).
+  weights_path: /path/to/last_teacher.pth
+  repo_dir: /path/to/dinov3     # local clone of the dinov3 repo. For 'dinov3_cfg' it is prepended
+                                # to sys.path so `import dinov3` resolves. For 'dinov3_local' it is
+                                # the torch.hub source (source="local", offline). null = fetch from GitHub.
+
+  # For model='dinov3_local': the torch.hub entrypoint name.
+  arch: 'dinov3_vitb16'         # MUST match what you trained: embed_dim 768 -> dinov3_vitb16, embed_dim 384 -> dinov3_vits16
+
+  # For model='dinov3_cfg': path to the DINOv3 training/eval yaml that defines the architecture
+  # (student.arch, patch_size, rope, etc.). The teacher backbone is rebuilt from it. Ignored by 'dinov3_local'.
+  config_file: null             # e.g. /path/to/dinov3/your_run_config.yaml
 
   # ---- FoundAD projector / training ----
-  crop_size: 512               # input resolution; patches = (crop_size / patch_size)^2
+  crop_size: 512               # match your SSL IMG_SIZE (512); patches = (crop_size / patch_size)^2
   pred_depth: 6
   pred_emb_dim: 384
   use_bfloat16: false
