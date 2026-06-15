@@ -44,6 +44,15 @@ class Trainer:
         self.loss_mode = args["meta"].get("loss_mode", "l2") # l2 or smooth_l1
         logger.info(f"Loss mode {self.loss_mode}")
 
+        # --- masked-neighbor context config (additive; default = dropout = unchanged) ---
+        self.context_mode = mcfg.get("context_mode", "dropout")  # "dropout" | "masked"
+        self.mask_ratio = mcfg.get("mask_ratio", 0.5)
+        self.mask_type = mcfg.get("mask_type", "block")
+        self.mask_block = tuple(mcfg.get("mask_block", [2, 2]))
+        logger.info(f"Context mode: {self.context_mode}"
+                    + (f" (ratio={self.mask_ratio}, type={self.mask_type}, block={self.mask_block})"
+                       if self.context_mode == "masked" else ""))
+
         # ---------- data ----------
         dcfg = args["data"]
         if dcfg["dataset"] in ("mvtec", "visa"):
@@ -109,6 +118,23 @@ class Trainer:
         else:
             raise NotImplementedError(f"Loss mode {self.loss_mode} not implemented")
 
+    def _masked_loss_fn(self, h, p, mask) -> torch.Tensor:
+        """Loss computed only at masked positions (masked-neighbor context path).
+
+        Args:
+            h: [B, N, C] target features from frozen encoder.
+            p: [B, N, C] predictor output.
+            mask: [B, N] bool, True = masked (reconstruct these).
+        """
+        h_m = h[mask]  # [M, C]
+        p_m = p[mask]  # [M, C]
+        if self.loss_mode == 'l2':
+            return F.mse_loss(h_m, p_m, reduction="mean")
+        elif self.loss_mode == 'smooth_l1':
+            return F.smooth_l1_loss(h_m, p_m, reduction="mean")
+        else:
+            raise NotImplementedError(f"Loss mode {self.loss_mode} not implemented")
+
     def _save_ckpt(self, ep, step=None):
         name = f"{self.tag}-step{step}.pth.tar" if step else f"{self.tag}-ep{ep}.pth.tar"
         torch.save({"predictor": self.model.predictor.state_dict(),
@@ -124,11 +150,24 @@ class Trainer:
                 _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis
                 def _step():
                     with autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
-                        if np.random.rand() < 0.5:
-                            h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs, paths, n_layer=self.n_layer)
+                        if self.context_mode == "masked":
+                            # --- masked-neighbor context path ---
+                            ctx_imgs = imgs if np.random.rand() < 0.5 else imgs_abn
+                            h = self.model.target_features(ctx_imgs, paths, n_layer=self.n_layer)
+                            _, p, mask = self.model.context_features_masked(
+                                ctx_imgs, paths, n_layer=self.n_layer,
+                                mask_ratio=self.mask_ratio,
+                                mask_type=self.mask_type,
+                                mask_block=self.mask_block,
+                            )
+                            return self._masked_loss_fn(h, p, mask)
                         else:
-                            h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs_abn, paths, n_layer=self.n_layer)
-                        return self._loss_fn(h, p,)
+                            # --- existing dropout context path (unchanged) ---
+                            if np.random.rand() < 0.5:
+                                h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs, paths, n_layer=self.n_layer)
+                            else:
+                                h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs_abn, paths, n_layer=self.n_layer)
+                            return self._loss_fn(h, p,)
                 (loss,), t = gpu_timer(lambda: [_step()])
                 if self.use_bf16: self.scaler.scale(loss).backward(); self.scaler.step(self.optimizer); self.scaler.update()
                 else: loss.backward(); self.optimizer.step()

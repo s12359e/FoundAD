@@ -1,0 +1,30 @@
+# @package app
+# Preset for training FoundAD with the masked-neighbor context path.
+# Masking teaches the predictor to reconstruct from periodic neighbors,
+# yielding high error on local defects (e.g. MG metal extrusion in SEM).
+#
+# Usage:
+#   python foundad/main.py app=train_masked data.dataset=mvtec ...
+#
+# To revert to the default dropout context, use app=train_dinov3 or set
+# meta.context_mode=dropout on the command line.
+meta:
+  model: 'dinov3'
+  crop_size: 512
+  pred_depth: 6
+  pred_emb_dim: 384
+  use_bfloat16: false
+  if_pred_pe: false
+  n_layer: 3
+  feat_normed: false
+  loss_mode: 'l2'              # l2 or smooth_l1
+
+  # --- masked-neighbor context (NEW keys) ---
+  context_mode: masked         # "dropout" (default/unchanged) | "masked"
+  mask_ratio: 0.5              # fraction of patch tokens to mask
+  mask_type: block             # "random" | "block" | "horizontal"
+  mask_block: [2, 2]           # block size [bH, bW] on the patch grid (for block/horizontal)
+
+logging:
+  folder: logs/${data.data_name}/${app.meta.model}_masked${oc.select:diy_name,""}
+  write_tag: train

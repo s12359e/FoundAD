@@ -15,8 +15,9 @@ The implementation of the paper **Foundation Visual Encoders Are Secretly Few-Sh
    - [Few-Shot Sampling](#few-shot-sampling)
    - [Model Training](#model-training)
    - [Anomaly Detection / Inference](#anomaly-detection--inference)
-4. [Custom Backbone & Dataset](#custom-backbone--dataset)
-5. [Acknowledgement](#acknowledgement)
+4. [Masked-Neighbor Context (NEW)](#masked-neighbor-context)
+5. [Custom Backbone & Dataset](#custom-backbone--dataset)
+6. [Acknowledgement](#acknowledgement)
    
 
 ## Environment Setup
@@ -85,6 +86,45 @@ After training, run inference:
 python foundad/main.py mode=AD data.dataset=mvtec data.data_name=mvtec_1shot diy_name=dbug data.test_root=/media/ymxlzgy/Data21/xinyan/mvtec app=test app.ckpt_step=1950
 ```
 where `data.test_root` is the dataset folder, and `app` is test_dinov2 or test_dinov3 under `configs/app/`. To adjust sample number K, please specify `testing.K_top_mvtec` and `testing.K_top_visa`.
+
+## Masked-Neighbor Context
+
+An alternative training context path that masks a fraction of patch tokens and reconstructs them from their spatial neighbors. This exploits the local periodicity of structured images (e.g. SEM semiconductor layouts): normal periodic regions are easy to reconstruct (low error), while local defects that break periodicity produce high error.
+
+**The default behavior is unchanged** — the original dropout-based context path is used unless you explicitly enable the masked mode.
+
+### Usage
+
+Use the `train_masked` config preset:
+
+```bash
+python foundad/main.py mode=train app=train_masked data.dataset=mvtec data.data_name=mvtec_1shot data.data_path=/path/to/data
+```
+
+Or enable it on any existing config:
+
+```bash
+python foundad/main.py mode=train app=train_dinov3 app.meta.context_mode=masked app.meta.mask_ratio=0.5 app.meta.mask_type=block app.meta.mask_block=[2,2]
+```
+
+### Config Keys
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `meta.context_mode` | `dropout` | `dropout` (original) or `masked` (new path) |
+| `meta.mask_ratio` | `0.5` | Fraction of patch tokens to mask |
+| `meta.mask_type` | `block` | Masking strategy: `random`, `block`, or `horizontal` |
+| `meta.mask_block` | `[2, 2]` | Block size `[bH, bW]` on the patch grid |
+
+### Masking Strategies
+
+- **`block`** (recommended default) — masks small contiguous rectangular blocks on the 32×32 patch grid. Best for local defects (e.g. metal extrusions).
+- **`random`** — i.i.d. per-token masking (MAE-style baseline).
+- **`horizontal`** — full-width horizontal stripe blocks, useful when defects extend along the horizontal (EPI) axis.
+
+### Inference
+
+Masking is **training-time only**. At inference, the predictor runs a full unmasked forward pass — identical to the dropout path. The predictor learns to exploit local periodicity during training, so prediction errors at test time naturally spike on defects.
 
 ## Custom Backbone & Dataset
 

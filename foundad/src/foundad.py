@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from src.utils.tensors import trunc_normal_
 from src.datasets.dataset import build_dataloader
 import src.dinov2.models.vision_transformer as vit
+from src.masking import build_batch_mask
 from transformers import AutoProcessor, SiglipVisionModel, CLIPVisionModel
 
 
@@ -56,6 +57,77 @@ class VisionModule(nn.Module):
         z = self._extract(images, paths, n_layer=n_layer)
         p = self.predictor(self.dropout(z))
         return z, p
+
+    def context_features_masked(self, images, paths, n_layer=3,
+                                 mask_ratio=0.5, mask_type="block",
+                                 mask_block=(2, 2)):
+        """Masked-neighbor context path (additive, does NOT replace context_features).
+
+        Masks a fraction of patch tokens and reconstructs them from visible
+        neighbors via the predictor.  Masking happens in the predictor's
+        embedding space (384-d) where mask_token lives, so we split the
+        predictor forward pass: predictor_embed first, then mask, then the
+        rest (_predictor_forward_from_embed).
+
+        At inference time this path is NOT used — the anomaly map is produced
+        by a full unmasked forward pass (model.predict(enc)), identical to the
+        dropout path.  Masking is a training-time pretext only; it teaches
+        the predictor to exploit local periodicity, so prediction errors at
+        test time naturally spike on extrusions that break that periodicity.
+
+        Returns:
+            z:    [B, N, C]   frozen encoder features (target)
+            p:    [B, N, C]   predictor output (only masked positions are meaningful)
+            mask: [B, N]      bool, True = masked (positions to compute loss on)
+        """
+        z = self._extract(images, paths, n_layer=n_layer)   # [B, N, C=768]
+        B, N, C = z.shape
+        H = W = int(N ** 0.5)
+        assert H * W == N, f"Patch count {N} is not a perfect square"
+
+        # Embed into predictor space (768 -> 384)
+        z_emb = self.predictor.predictor_embed(z)            # [B, N, 384]
+
+        # Build per-sample masks
+        mask = build_batch_mask(B, H, W, mask_ratio, mask_type,
+                                tuple(mask_block), device=z.device)  # [B, N] bool
+
+        # Replace masked positions with the learnable mask_token [1, 1, 384]
+        z_masked = z_emb.clone()
+        z_masked[mask] = self.predictor.mask_token.squeeze(0).squeeze(0)
+
+        # Run the rest of the predictor (pos_embed -> blocks -> norm -> proj)
+        p = self._predictor_forward_from_embed(z_masked)     # [B, N, C=768]
+        return z, p, mask
+
+    def _predictor_forward_from_embed(self, x_emb):
+        """Run the predictor starting AFTER predictor_embed.
+
+        Reuses the predictor's existing sub-modules (pos_embed, blocks,
+        norm, proj) without modifying VisionTransformerPredictor.forward().
+        """
+        pred = self.predictor
+        B = x_emb.size(0)
+
+        if pred.if_pe:
+            if pred.if_rope:
+                H, W = 32, 32  # matches the hardcoded value in predictor.forward()
+                rope_sincos = pred.predictor_pos_embed(H=H, W=W)
+                # RoPE is applied inside attention blocks, not added here
+            else:
+                x_emb = x_emb + pred.predictor_pos_embed.repeat(B, 1, 1)
+
+        residuals = x_emb.clone()
+        x = x_emb
+        for blk in pred.predictor_blocks:
+            x = blk(x) + residuals
+        x = pred.predictor_norm(x)
+        x = pred.predictor_proj(x)
+
+        if pred.feat_normed:
+            x = F.normalize(x, dim=-1)
+
+        return x
 
     def _build_encoder(self, model: str):
 
