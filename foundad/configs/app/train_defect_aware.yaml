@@ -1,0 +1,28 @@
+# @package app
+# Preset for training FoundAD with defect-aware loss weighting.
+# The synthetic-defect (CutPaste) region is up-weighted in the reconstruction
+# loss, so the small defect signal is not diluted by the ~90% of patches that
+# are identical between the clean and abnormal images.
+#
+# Usage:
+#   python foundad/main.py mode=train app=train_defect_aware data.dataset=mvtec ...
+#
+# To disable, use app=train_dinov3 or set meta.defect_aware_loss=false.
+meta:
+  model: 'dinov3'
+  crop_size: 512
+  pred_depth: 6
+  pred_emb_dim: 384
+  use_bfloat16: false
+  if_pred_pe: false
+  n_layer: 3
+  feat_normed: false
+  loss_mode: 'l2'              # l2 or smooth_l1
+
+  # --- defect-aware loss (NEW keys) ---
+  defect_aware_loss: true      # false (default/unchanged) | true
+  w_defect: 5.0                # loss weight at pasted-defect patches (vs 1.0 elsewhere)
+
+logging:
+  folder: logs/${data.data_name}/${app.meta.model}_defectaware${oc.select:diy_name,""}
+  write_tag: train

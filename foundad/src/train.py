@@ -53,6 +53,15 @@ class Trainer:
                     + (f" (ratio={self.mask_ratio}, type={self.mask_type}, block={self.mask_block})"
                        if self.context_mode == "masked" else ""))
 
+        # --- defect-aware loss config (additive; default off = unchanged) ---
+        # Weights the reconstruction loss higher at patches where the synthetic
+        # defect was pasted, so the (tiny) defect signal isn't diluted by the
+        # ~90% of patches that are identical between clean and abnormal images.
+        self.defect_aware_loss = mcfg.get("defect_aware_loss", False)
+        self.w_defect = mcfg.get("w_defect", 5.0)
+        if self.defect_aware_loss:
+            logger.info(f"Defect-aware loss ON (w_defect={self.w_defect})")
+
         # ---------- data ----------
         dcfg = args["data"]
         if dcfg["dataset"] in ("mvtec", "visa"):
@@ -135,6 +144,33 @@ class Trainer:
         else:
             raise NotImplementedError(f"Loss mode {self.loss_mode} not implemented")
 
+    def _defect_aware_loss_fn(self, h, p, pixel_mask) -> torch.Tensor:
+        """Per-patch reconstruction loss, up-weighted at pasted-defect patches.
+
+        Args:
+            h: [B, N, C] target features from frozen encoder.
+            p: [B, N, C] predictor output.
+            pixel_mask: [B, 1, H_img, W_img] binary mask of the pasted defect.
+        """
+        B, N, C = h.shape
+        g = int(round(N ** 0.5))
+        assert g * g == N, f"Patch count {N} is not a perfect square"
+
+        # Pixel mask -> patch grid: a patch is "defect" if ANY of its pixels are.
+        pm = F.adaptive_max_pool2d(pixel_mask.float(), output_size=(g, g))  # [B, 1, g, g]
+        pm = (pm > 0).reshape(B, N)                                          # [B, N] bool
+
+        # Per-patch error (mean over channels), respecting loss_mode.
+        if self.loss_mode == 'l2':
+            err = F.mse_loss(h, p, reduction="none").mean(dim=2)             # [B, N]
+        elif self.loss_mode == 'smooth_l1':
+            err = F.smooth_l1_loss(h, p, reduction="none").mean(dim=2)
+        else:
+            raise NotImplementedError(f"Loss mode {self.loss_mode} not implemented")
+
+        w = torch.where(pm, float(self.w_defect), 1.0).to(err.dtype)        # [B, N]
+        return (err * w).sum() / w.sum()
+
     def _save_ckpt(self, ep, step=None):
         name = f"{self.tag}-step{step}.pth.tar" if step else f"{self.tag}-ep{ep}.pth.tar"
         torch.save({"predictor": self.model.predictor.state_dict(),
@@ -147,7 +183,10 @@ class Trainer:
             logger.info("Epoch %d", ep+1); self.sampler.set_epoch(ep); loss_m, time_m = AverageMeter(), AverageMeter()
             for itr, (imgs, labels, paths) in enumerate(self.loader):
                 imgs = imgs.to(self.device, non_blocking=True)
-                _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis
+                if self.defect_aware_loss:
+                    _, imgs_abn, paste_mask = self.cutpaste(imgs, labels, return_mask=True) # anomaly synthesis (+ paste mask)
+                else:
+                    _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis
                 def _step():
                     with autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
                         if self.context_mode == "masked":
@@ -164,9 +203,13 @@ class Trainer:
                         else:
                             # --- existing dropout context path (unchanged) ---
                             if np.random.rand() < 0.5:
-                                h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs, paths, n_layer=self.n_layer)
+                                h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs, paths, n_layer=self.n_layer); used_abn = False
                             else:
-                                h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs_abn, paths, n_layer=self.n_layer)
+                                h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs_abn, paths, n_layer=self.n_layer); used_abn = True
+                            # Defect-aware weighting only applies to the abnormal branch
+                            # (the clean->clean branch has no pasted defect to up-weight).
+                            if self.defect_aware_loss and used_abn:
+                                return self._defect_aware_loss_fn(h, p, paste_mask)
                             return self._loss_fn(h, p,)
                 (loss,), t = gpu_timer(lambda: [_step()])
                 if self.use_bf16: self.scaler.scale(loss).backward(); self.scaler.step(self.optimizer); self.scaler.update()

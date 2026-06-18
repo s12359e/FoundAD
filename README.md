@@ -16,8 +16,9 @@ The implementation of the paper **Foundation Visual Encoders Are Secretly Few-Sh
    - [Model Training](#model-training)
    - [Anomaly Detection / Inference](#anomaly-detection--inference)
 4. [Masked-Neighbor Context (NEW)](#masked-neighbor-context)
-5. [Custom Backbone & Dataset](#custom-backbone--dataset)
-6. [Acknowledgement](#acknowledgement)
+5. [Defect-Aware Loss (NEW)](#defect-aware-loss)
+6. [Custom Backbone & Dataset](#custom-backbone--dataset)
+7. [Acknowledgement](#acknowledgement)
    
 
 ## Environment Setup
@@ -125,6 +126,39 @@ python foundad/main.py mode=train app=train_dinov3 app.meta.context_mode=masked 
 ### Inference
 
 Masking is **training-time only**. At inference, the predictor runs a full unmasked forward pass — identical to the dropout path. The predictor learns to exploit local periodicity during training, so prediction errors at test time naturally spike on defects.
+
+## Defect-Aware Loss
+
+During training, FoundAD synthesizes anomalies with CutPaste and teaches the predictor to "repair" them back to normal features. However, a pasted defect typically covers only a small fraction of the image, so the original loss (averaged over **all** patches) dilutes the defect signal with the ~90% of patches that are identical between the clean and abnormal images.
+
+Defect-aware loss up-weights the patches where the synthetic defect was pasted, concentrating gradients on the region that actually matters. This usually improves pixel-level localization (AUROC / PRO).
+
+**The default behavior is unchanged** — this is only active when explicitly enabled.
+
+### Usage
+
+Use the `train_defect_aware` config preset:
+
+```bash
+python foundad/main.py mode=train app=train_defect_aware data.dataset=mvtec data.data_name=mvtec_1shot data.data_path=/path/to/data
+```
+
+Or enable it on any existing config:
+
+```bash
+python foundad/main.py mode=train app=train_dinov3 app.meta.defect_aware_loss=true app.meta.w_defect=5.0
+```
+
+### Config Keys
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `meta.defect_aware_loss` | `false` | `false` (original, all patches weighted equally) or `true` |
+| `meta.w_defect` | `5.0` | Loss weight at pasted-defect patches (vs `1.0` elsewhere) |
+
+### How it works
+
+The CutPaste synthesizer now optionally returns a binary mask of the pasted region (`return_mask=True`); existing callers are unaffected. At train time this pixel mask is downsampled to the 32×32 patch grid (a patch counts as "defect" if any of its pixels are), and the per-patch reconstruction error is weighted by `w_defect` there. Inference is unchanged.
 
 ## Custom Backbone & Dataset
 

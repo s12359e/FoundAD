@@ -104,23 +104,33 @@ class CutPasteNormal(CutPaste):
         self.area_ratio = area_ratio
         self.aspect_ratio = aspect_ratio
 
-    def __call__(self, imgs, subclass):
+    def __call__(self, imgs, subclass, return_mask=False):
         batch_size, _, h, w = imgs.shape
         augmented_imgs = imgs.clone()
+        masks = torch.zeros((batch_size, 1, h, w), device=imgs.device) if return_mask else None
 
         for i in range(batch_size):
             img = imgs[i]
-            augmented = self.process_image(img, subclass)
-            augmented_imgs[i] = augmented
+            if return_mask:
+                augmented, m = self.process_image(img, subclass, return_mask=True)
+                augmented_imgs[i] = augmented
+                masks[i] = m
+            else:
+                augmented = self.process_image(img, subclass)
+                augmented_imgs[i] = augmented
 
+        if return_mask:
+            return imgs, augmented_imgs, masks
         return imgs, augmented_imgs
 
-    def process_image(self, img, subclass):
+    def process_image(self, img, subclass, return_mask=False):
         img = img.clone()
         _, h, w = img.shape
 
         target_foreground_mask = generate_target_foreground_mask(img, subclass)  # [H, W]
 
+        # paste_mask records WHERE the synthetic defect was pasted (for defect-aware loss).
+        paste_mask = torch.zeros((1, h, w), device=img.device) if return_mask else None
 
         area = h * w
         target_area = random.uniform(self.area_ratio[0], self.area_ratio[1]) * area
@@ -130,7 +140,7 @@ class CutPasteNormal(CutPaste):
         cut_h = int(round(math.sqrt(target_area / aspect_ratio)))
 
         if cut_w <= 0 or cut_h <= 0:
-            return img
+            return (img, paste_mask) if return_mask else img
 
         from_x = random.randint(0, w - cut_w)
         from_y = random.randint(0, h - cut_h)
@@ -142,7 +152,7 @@ class CutPasteNormal(CutPaste):
 
         mask_indices = np.argwhere(target_foreground_mask == 1)
         if len(mask_indices) == 0:
-            return img 
+            return (img, paste_mask) if return_mask else img
 
         valid_indices = []
         for y, x in mask_indices:
@@ -150,13 +160,16 @@ class CutPasteNormal(CutPaste):
                 valid_indices.append((y, x))
 
         if len(valid_indices) == 0:
-            return img  
+            return (img, paste_mask) if return_mask else img
 
         to_y, to_x = random.choice(valid_indices)
 
         augmented = img.clone()
         augmented[:, to_y:to_y+cut_h, to_x:to_x+cut_w] = patch
 
+        if return_mask:
+            paste_mask[:, to_y:to_y+cut_h, to_x:to_x+cut_w] = 1.0
+            return augmented, paste_mask
         return augmented
 
 class CutPasteScar(CutPaste):
@@ -166,28 +179,39 @@ class CutPasteScar(CutPaste):
         self.height = height
         self.rotation = rotation
 
-    def __call__(self, imgs, subclass):
+    def __call__(self, imgs, subclass, return_mask=False):
         batch_size, _, h, w = imgs.shape
         augmented_imgs = imgs.clone()
+        masks = torch.zeros((batch_size, 1, h, w), device=imgs.device) if return_mask else None
 
         for i in range(batch_size):
             img = imgs[i]
-            augmented = self.process_image(img, subclass)
-            augmented_imgs[i] = augmented
+            if return_mask:
+                augmented, m = self.process_image(img, subclass, return_mask=True)
+                augmented_imgs[i] = augmented
+                masks[i] = m
+            else:
+                augmented = self.process_image(img, subclass)
+                augmented_imgs[i] = augmented
 
+        if return_mask:
+            return imgs, augmented_imgs, masks
         return imgs, augmented_imgs
 
-    def process_image(self, img, subclass):
+    def process_image(self, img, subclass, return_mask=False):
         img = img.clone()
         _, h, w = img.shape
 
         target_foreground_mask = generate_target_foreground_mask(img, subclass)
-    
+
+        # paste_mask records WHERE the synthetic defect was pasted (for defect-aware loss).
+        paste_mask = torch.zeros((1, h, w), device=img.device) if return_mask else None
+
         cut_w = int(random.uniform(*self.width))
         cut_h = int(random.uniform(*self.height))
 
         if cut_w <= 0 or cut_h <= 0:
-            return img
+            return (img, paste_mask) if return_mask else img
 
         from_x = random.randint(0, w - cut_w)
         from_y = random.randint(0, h - cut_h)
@@ -207,7 +231,7 @@ class CutPasteScar(CutPaste):
 
         mask_indices = np.argwhere(target_foreground_mask == 1)
         if len(mask_indices) == 0:
-            return img  
+            return (img, paste_mask) if return_mask else img
 
         valid_indices = []
         for y, x in mask_indices:
@@ -215,7 +239,7 @@ class CutPasteScar(CutPaste):
                 valid_indices.append((y, x))
 
         if len(valid_indices) == 0:
-            return img  
+            return (img, paste_mask) if return_mask else img
 
         to_y, to_x = random.choice(valid_indices)
 
@@ -223,6 +247,15 @@ class CutPasteScar(CutPaste):
         mask = torch.ones_like(patch)
         augmented = self.paste_with_mask(augmented, patch, mask, to_y, to_x)
 
+        if return_mask:
+            # Footprint of the rotated scar (the same rotation applied to a unit box).
+            # NEAREST keeps it binary; uses no RNG so the augmented image is unchanged.
+            shape_mask = torch.ones((1, cut_h, cut_w), device=img.device)
+            shape_mask = TF.rotate(shape_mask, angle=rot_deg,
+                                   interpolation=TF.InterpolationMode.NEAREST, expand=True)
+            footprint = (shape_mask > 0.5).float()
+            paste_mask[:, to_y:to_y+patch_h, to_x:to_x+patch_w] = footprint
+            return augmented, paste_mask
         return augmented
 
     def paste_with_mask(self, img, patch, mask, top, left):
@@ -244,17 +277,25 @@ class CutPasteUnion(object):
         self.cutpaste_normal = CutPasteNormal(**kwargs)
         self.cutpaste_scar = CutPasteScar(**kwargs)
 
-    def __call__(self, imgs, subclasses):
+    def __call__(self, imgs, subclasses, return_mask=False):
         batch_size = imgs.shape[0]
         augmented_imgs = imgs.clone()
+        masks = torch.zeros((batch_size, 1, *imgs.shape[2:]), device=imgs.device) if return_mask else None
 
         for i in range(batch_size):
             img = imgs[i].unsqueeze(0)  # [1, C, H, W]
             subclass = subclasses[i]
             if random.random() < 0.5:
-                _, augmented = self.cutpaste_normal(img, subclass)
+                out = self.cutpaste_normal(img, subclass, return_mask=return_mask)
             else:
-                _, augmented = self.cutpaste_scar(img, subclass)
+                out = self.cutpaste_scar(img, subclass, return_mask=return_mask)
+            if return_mask:
+                _, augmented, m = out
+                masks[i] = m.squeeze(0)
+            else:
+                _, augmented = out
             augmented_imgs[i] = augmented.squeeze(0)
 
+        if return_mask:
+            return imgs, augmented_imgs, masks
         return imgs, augmented_imgs
